@@ -1,20 +1,15 @@
 import time
-from typing import Optional
 
 import flexitest
-import web3.eth
 from web3 import Web3
 
 from envs import testenv
 from utils.reth import get_chainconfig
-from utils.utils import (
-    RollupParamsSettings,
-    wait_until,
-)
+from utils.utils import RollupParamsSettings
 
-BLOCK_GAS_LIMIT = 1_000_000
-EPOCH_GAS_LIMIT = 2_000_000
-GAS_PER_TX = 450_000
+BLOCK_GAS_LIMIT = 100_000
+EPOCH_GAS_LIMIT = 200_000
+GAS_PER_TX = 21_000
 TX_COUNT = 10
 
 
@@ -22,12 +17,8 @@ chain_config = get_chainconfig()
 chain_config["gasLimit"] = hex(BLOCK_GAS_LIMIT)
 
 
-def block_number_available(web3, block_no):
-    return lambda: web3.eth.get_block_number() >= block_no
-
-
 @flexitest.register
-class ElBatchGasLimitTest(testenv.StrataTester):
+class ElBatchGasLimitTest(testenv.StrataTestBase):
     def __init__(self, ctx: flexitest.InitContext):
         # FIXME: running in strict mode to not cross epoch boundaries while testing
         rollup_settings = RollupParamsSettings.new_default().strict_mode()
@@ -47,15 +38,13 @@ class ElBatchGasLimitTest(testenv.StrataTester):
         time.sleep(1)
 
         reth = ctx.get_service("reth")
+        rethrpc = reth.create_rpc()
         web3: Web3 = reth.create_web3()
 
         source = web3.address
         nonce = web3.eth.get_transaction_count(source)
         # send 10 txns with GAS_PER_TX gas each
-        _txids = [
-            make_gas_burner_transaction(web3, source, nonce + i, GAS_PER_TX)
-            for i in range(0, TX_COUNT)
-        ]
+        _txids = [make_burner_transaction(web3, nonce + i) for i in range(0, TX_COUNT)]
         # if all txns are included, epoch gas limit should be crossed
         assert GAS_PER_TX * TX_COUNT > EPOCH_GAS_LIMIT
 
@@ -70,8 +59,9 @@ class ElBatchGasLimitTest(testenv.StrataTester):
         total_gas_used = 0
         block_no = original_block_no + 1
         zero_gas_blocks = 0
+        reth_waiter = self.create_reth_waiter(rethrpc)
         while zero_gas_blocks < 2:
-            wait_until(block_number_available(web3, block_no))
+            reth_waiter.wait_until_eth_block_at_least(block_no)
 
             header = web3.eth.get_block(block_no)
             self.info(f"block_number: {header['number']}, gas_used: {header['gasUsed']}")
@@ -90,32 +80,19 @@ class ElBatchGasLimitTest(testenv.StrataTester):
         assert total_gas_used < GAS_PER_TX * TX_COUNT, "all txns should NOT be processed"
 
 
-def make_gas_burner_transaction(
-    web3: web3.Web3, address: str, nonce: int, burn_gas: int, gas_limit: Optional[int] = None
-):
+def make_burner_transaction(web3: Web3, nonce: int):
     """
-    Performs a transaction to own account with a large calldata.
-    Sends enough calldata to consume `burn_gas` gas.
-    Note: reth has default calldata limit of 128kb = ~ 2M gas
-
     :param web3: Web3 instance.
-    :param address: account address
-    :param nonce: custom nonce for queueing multiple txns
-    :param burn_gas: Amount of gas to burn through calldata.
-    :param gas_limit: Custom gas limit to use.
+    :nonce: Nonce for the transaction.
     :return: Transaction id
     """
-    # each non-zero byte calldata consumes 16 gas
-    data = "0x" + "01" * (burn_gas // 16)
 
     tx_params = {
-        "to": address,
-        "value": 0,
-        "gas": gas_limit or burn_gas + 21000,
-        "data": data,
-        "from": address,
-        "nonce": hex(nonce),
+        "to": "0x0000000000000000000000000000000000000000",
+        "value": Web3.to_wei(0.001, "ether"),
+        "gas": GAS_PER_TX,
+        "from": web3.address,
+        "nonce": nonce,
     }
     txid = web3.eth.send_transaction(tx_params)
-    print("txid", txid.to_0x_hex())
     return txid

@@ -58,10 +58,11 @@ pub fn next_u32(instructions: &mut Instructions<'_>) -> Option<u32> {
     }
 }
 
+/// Returns taproot address along with untweaked internal pubkey
 pub fn generate_taproot_address(
     operator_wallet_pks: &[Buf32],
     network: Network,
-) -> anyhow::Result<BitcoinAddress> {
+) -> anyhow::Result<(BitcoinAddress, XOnlyPublicKey)> {
     let keys = operator_wallet_pks.iter().map(|op| {
         PublicKey::from_x_only_public_key(
             XOnlyPublicKey::from_slice(op.as_ref()).expect("slice not an x-only public key"),
@@ -83,7 +84,7 @@ pub fn generate_taproot_address(
     let addr = Address::p2tr(SECP256K1, x_only_pub_key, merkle_root, network);
     let addr = BitcoinAddress::parse(&addr.to_string(), network)?;
 
-    Ok(addr)
+    Ok((addr, x_only_pub_key))
 }
 
 /// Reads the operator wallet public keys from Rollup params. Returns None if
@@ -93,4 +94,84 @@ pub fn get_operator_wallet_pks(params: &RollupParams) -> Vec<Buf32> {
     let OperatorConfig::Static(operator_table) = &params.operator_config;
 
     operator_table.iter().map(|op| *op.wallet_pk()).collect()
+}
+
+#[cfg(any(test, feature = "test_utils"))]
+pub mod test_utils {
+    use bitcoin::{
+        secp256k1::{Keypair, Secp256k1, SecretKey},
+        Address, Network, ScriptBuf,
+    };
+    use strata_primitives::{
+        bitcoin_bosd::Descriptor,
+        l1::{BitcoinAddress, XOnlyPk},
+        params::Params,
+        sorted_vec::FlatTable,
+    };
+    use strata_state::bridge_state::DepositEntry;
+
+    use crate::{filter::types::conv_deposit_to_fulfillment, TxFilterConfig};
+
+    pub fn get_taproot_addr_and_keypair() -> (Address, Keypair) {
+        // Generate valid signature
+        let secp = Secp256k1::new();
+
+        // Step 1. Create a random internal key (you can use a fixed one in tests)
+        let secret_key = SecretKey::from_slice(&[42u8; 32]).unwrap();
+        let keypair = Keypair::from_secret_key(&secp, &secret_key);
+        let (internal_xonly, _parity) = keypair.x_only_public_key();
+
+        // Step 2. Create a Taproot address
+        let taproot_addr = Address::p2tr(&secp, internal_xonly, None, Network::Regtest);
+        (taproot_addr, keypair)
+    }
+
+    /// Helper function to create filter config
+    pub fn create_tx_filter_config(params: &Params) -> (TxFilterConfig, Keypair) {
+        let mut txconfig =
+            TxFilterConfig::derive_from(params.rollup()).expect("can't get filter config");
+
+        let mut deposit_config = txconfig.deposit_config.clone();
+        let (taproot_addr, keypair) = get_taproot_addr_and_keypair();
+        let (op_key, _) = keypair.x_only_public_key();
+        deposit_config.operators_pubkey = XOnlyPk::new(op_key.serialize().into()).unwrap();
+        deposit_config.address =
+            BitcoinAddress::from_bytes(taproot_addr.script_pubkey().as_bytes(), Network::Regtest)
+                .unwrap();
+
+        txconfig.deposit_config = deposit_config;
+        (txconfig, keypair)
+    }
+
+    /// Helper function to create filter config. Returns the filter config with expected withdrawal
+    /// fulfillments derived from deposit entries.
+    pub fn get_filter_config_from_deposit_entries(
+        params: Params,
+        deps: &[DepositEntry],
+    ) -> TxFilterConfig {
+        let mut filterconfig = TxFilterConfig::derive_from(params.rollup()).unwrap();
+        // Watch all withdrawals that have been ordered.
+        let exp_fulfillments = deps
+            .iter()
+            .flat_map(conv_deposit_to_fulfillment)
+            .collect::<Vec<_>>();
+        filterconfig.expected_withdrawal_fulfillments =
+            FlatTable::try_from_unsorted(exp_fulfillments).expect("types: malformed deposits");
+        filterconfig
+    }
+
+    /// Helper function to create opreturn meta for withdrawal fulfillment
+    pub fn create_opreturn_metadata_for_withdrawal_fulfillment(
+        operator_idx: u32,
+        deposit_idx: u32,
+        deposit_txid: &[u8; 32],
+    ) -> ScriptBuf {
+        let mut metadata = [0u8; 40];
+        // first 4 bytes = operator idx
+        metadata[..4].copy_from_slice(&operator_idx.to_be_bytes());
+        // next 4 bytes = deposit idx
+        metadata[4..8].copy_from_slice(&deposit_idx.to_be_bytes());
+        metadata[8..40].copy_from_slice(deposit_txid);
+        Descriptor::new_op_return(&metadata).unwrap().to_script()
+    }
 }

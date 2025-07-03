@@ -1,15 +1,13 @@
-import time
-
 import flexitest
 from strata_utils import (
     deposit_request_transaction,
     is_valid_bosd,
 )
-from web3 import middleware
 
 from envs.rollup_params_cfg import RollupConfig
 from utils import *
 from utils.constants import PRECOMPILE_BRIDGEOUT_ADDRESS
+from utils.wait import StrataWaiter
 
 from . import BaseMixin
 
@@ -28,13 +26,7 @@ class BridgeMixin(BaseMixin):
     def premain(self, ctx: flexitest.RunContext):
         super().premain(ctx)
 
-        self.eth_account = self.web3.eth.account.from_key(ETH_PRIVATE_KEY)
-
-        # Inject signing middleware
-        self.web3.middleware_onion.inject(
-            middleware.SignAndSendRawMiddlewareBuilder.build(self.eth_account),
-            layer=0,
-        )
+        self.bridge_eth_account = self.w3.eth.account.from_key(ETH_PRIVATE_KEY)
 
     def deposit(self, ctx: flexitest.RunContext, el_address, bridge_pk) -> str:
         """
@@ -57,10 +49,8 @@ class BridgeMixin(BaseMixin):
 
         # Wait until the deposit is seen on L2
         expected_balance = initial_balance + deposit_amount * SATS_TO_WEI
-        wait_until(
-            lambda: int(self.rethrpc.eth_getBalance(el_address), 16) == expected_balance,
-            error_with="Strata balance after deposit is not as expected",
-        )
+        strata_waiter = StrataWaiter(self.seqrpc, self.logger, timeout=60, interval=2)
+        strata_waiter.wait_until_balance_equals(el_address, expected_balance, self.rethrpc)
 
         return tx_id
 
@@ -181,13 +171,14 @@ class BridgeMixin(BaseMixin):
         # Send the transaction to the Bitcoin network
         drt_tx_id: str = self.btcrpc.proxy.sendrawtransaction(tx)
 
-        time.sleep(1)
-
         # time to mature DRT
         self.btcrpc.proxy.generatetoaddress(6, seq_addr)
-        time.sleep(3)
+        # Wait for DRT maturation
+        strata_waiter = StrataWaiter(self.seqrpc, self.logger, timeout=30, interval=1)
+        strata_waiter.wait_for_blocks(6)
 
         # time to mature DT
         self.btcrpc.proxy.generatetoaddress(6, seq_addr)
-        time.sleep(3)
+        # Wait for DT maturation
+        strata_waiter.wait_for_blocks(6)
         return drt_tx_id

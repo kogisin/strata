@@ -1,5 +1,4 @@
 import logging
-import time
 
 import flexitest
 
@@ -9,7 +8,7 @@ WAIT_TIME = 2
 
 
 @flexitest.register
-class BridgeMsgTest(testenv.StrataTester):
+class BridgeMsgTest(testenv.StrataTestBase):
     def __init__(self, ctx: flexitest.InitContext):
         ctx.set_env("basic")
 
@@ -38,6 +37,9 @@ class BridgeMsgTest(testenv.StrataTester):
         )
 
         seqrpc.strata_submitBridgeMsg(raw_msg)
+
+        # Wait for message processing - using time.sleep replacement
+        import time
 
         time.sleep(WAIT_TIME + 2)
 

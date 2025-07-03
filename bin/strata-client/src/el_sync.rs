@@ -1,12 +1,16 @@
 use strata_db::DbError;
-use strata_eectl::{engine::ExecEngineCtl, errors::EngineError, messages::ExecPayloadData};
+use strata_eectl::{
+    engine::{ExecEngineCtl, L2BlockRef},
+    errors::EngineError,
+    messages::ExecPayloadData,
+};
 use strata_state::id::L2BlockId;
 use strata_storage::NodeStorage;
 use thiserror::Error;
 use tracing::{debug, info};
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub(crate) enum Error {
     #[error("missing chainstate for slot {0}")]
     MissingChainstate(u64),
     #[error("missing l2block {0}")]
@@ -20,7 +24,7 @@ pub enum Error {
 /// Sync missing blocks in EL using payloads stored in L2 block database.
 ///
 /// TODO: retry on network errors
-pub fn sync_chainstate_to_el(
+pub(crate) fn sync_chainstate_to_el(
     storage: &NodeStorage,
     engine: &impl ExecEngineCtl,
 ) -> Result<(), Error> {
@@ -37,7 +41,7 @@ pub fn sync_chainstate_to_el(
             return Err(Error::MissingChainstate(idx));
         };
 
-        Ok(engine.check_block_exists(*entry.tip_blockid())?)
+        Ok(engine.check_block_exists(L2BlockRef::Id(*entry.tip_blockid()))?)
     })?
     .map(|idx| idx + 1) // sync from next index
     .unwrap_or(0); // sync from genesis

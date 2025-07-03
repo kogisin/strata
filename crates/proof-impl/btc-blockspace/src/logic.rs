@@ -5,7 +5,7 @@ use bitcoin::{
     Block,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
-use strata_l1tx::filter::{indexer::index_block, TxFilterConfig};
+use strata_l1tx::filter::{indexer::index_block, types::TxFilterConfig};
 use strata_primitives::l1::{L1TxProof, ProtocolOperation};
 use zkaleido::ZkVmEnv;
 
@@ -63,7 +63,7 @@ pub fn process_blockscan_proof(zkvm: &impl ZkVmEnv) {
         let protocol_ops: Vec<ProtocolOperation> =
             index_block(&block, ProverTxVisitorImpl::new, &tx_filters)
                 .into_iter()
-                .flat_map(|entry| entry.into_contents())
+                .flat_map(|entry| entry.into_item())
                 .collect();
 
         // 5. Create the blockscan result and append to blockscan results

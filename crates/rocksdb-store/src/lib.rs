@@ -1,3 +1,5 @@
+//! RocksDB store for the Alpen codebase.
+
 pub mod bridge_relay;
 pub mod broadcaster;
 pub mod chain_state;
@@ -52,9 +54,7 @@ use writer::schemas::{IntentIdxSchema, IntentSchema, PayloadSchema};
 use crate::{
     chain_state::schemas::WriteBatchSchema,
     client_state::schemas::ClientUpdateOutputSchema,
-    l1::schemas::{
-        L1BlockSchema, L1BlocksByHeightSchema, L1CanonicalBlockSchema, MmrSchema, TxnSchema,
-    },
+    l1::schemas::{L1BlockSchema, L1BlocksByHeightSchema, L1CanonicalBlockSchema, TxnSchema},
     sequence::SequenceSchema,
     sync_event::schemas::SyncEventSchema,
 };
@@ -67,7 +67,6 @@ pub const STORE_COLUMN_FAMILIES: &[ColumnFamilyName] = &[
     SequenceSchema::COLUMN_FAMILY_NAME,
     ClientUpdateOutputSchema::COLUMN_FAMILY_NAME,
     L1BlockSchema::COLUMN_FAMILY_NAME,
-    MmrSchema::COLUMN_FAMILY_NAME,
     TxnSchema::COLUMN_FAMILY_NAME,
     L1BlocksByHeightSchema::COLUMN_FAMILY_NAME,
     L1CanonicalBlockSchema::COLUMN_FAMILY_NAME,

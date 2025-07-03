@@ -4,8 +4,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
 use async_trait::async_trait;
+use bitcoind_async_client::{traits::Reader, Client};
 use jsonrpsee::{core::RpcResult, http_client::HttpClient, RpcModule};
-use strata_btcio::rpc::{traits::ReaderRpc, BitcoinClient};
 use strata_db::traits::ProofDatabase;
 use strata_primitives::{
     evm_exec::EvmEeBlockCommitment, l1::L1BlockCommitment, l2::L2BlockCommitment, proof::Epoch,
@@ -73,7 +73,7 @@ pub(crate) struct ProverClientRpc {
 }
 
 impl ProverClientRpc {
-    pub fn new(
+    pub(crate) fn new(
         task_tracker: Arc<Mutex<TaskTracker>>,
         operator: Arc<ProofOperator>,
         db: Arc<ProofDb>,
@@ -83,6 +83,15 @@ impl ProverClientRpc {
             operator,
             db,
         }
+    }
+
+    /// Start the RPC server with the given URL and dev RPC enablement
+    pub(crate) async fn start_server(
+        &self,
+        rpc_url: String,
+        enable_dev_rpc: bool,
+    ) -> anyhow::Result<()> {
+        start(self, rpc_url, enable_dev_rpc).await
     }
 }
 
@@ -232,7 +241,7 @@ impl StrataProverClientApiServer for ProverClientRpc {
 /// - Panics if fetching a block or its height fails
 async fn derive_l1_range(
     cl_client: &HttpClient,
-    btc_client: &BitcoinClient,
+    btc_client: &Client,
     l2_range: (L2BlockCommitment, L2BlockCommitment),
 ) -> Option<(L1BlockCommitment, L1BlockCommitment)> {
     // sanity check

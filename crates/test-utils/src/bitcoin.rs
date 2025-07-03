@@ -2,13 +2,26 @@ use std::str::FromStr;
 
 use bitcoin::{
     absolute::LockTime,
-    consensus::deserialize,
+    consensus::{self, deserialize},
+    hashes::Hash,
+    key::TapTweak,
     opcodes::all::OP_RETURN,
     script::{self, PushBytesBuf},
-    Address, Amount, Block, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+    secp256k1::{Keypair, Message, Secp256k1},
+    sighash::{Prevouts, SighashCache},
+    Address, Amount, Block, OutPoint, ScriptBuf, Sequence, TapNodeHash, TapSighashType,
+    Transaction, TxIn, TxOut, Witness,
 };
-use strata_l1tx::filter::TxFilterConfig;
-use strata_primitives::l1::{BitcoinAddress, L1HeaderRecord, OutputRef};
+use strata_l1tx::TxFilterConfig;
+use strata_primitives::{
+    bitcoin_bosd::Descriptor,
+    buf::Buf32,
+    l1::{BitcoinAddress, BitcoinAmount, L1HeaderRecord, OutputRef},
+    params::DepositTxParams,
+};
+use strata_state::bridge_state::{
+    DepositEntry, DepositState, DispatchCommand, DispatchedState, WithdrawOutput,
+};
 
 use crate::{l2::gen_params, ArbitraryGenerator};
 
@@ -47,12 +60,50 @@ pub fn get_test_tx_filter_config() -> TxFilterConfig {
     TxFilterConfig::derive_from(config.rollup()).expect("can't derive filter config")
 }
 
+/// Creates a signed test Taproot deposit transaction.
+///
+/// Generates a dummy input referencing a random previous output, and constructs a
+/// transaction with two outputs:
+/// - A payment to `out_script_pubkey` with the specified amount.
+/// - An OP_RETURN output using `opreturn_script` with zero value.
+///
+/// The input is signed using Taproot key spend with `SIGHASH_DEFAULT`, and the address
+/// is derived from the provided `keypair` and `tapnode_hash`.
+///
+/// # Arguments
+/// - `amt`: Amount to deposit.
+/// - `out_script_pubkey`: Script to spend to.
+/// - `opreturn_script`: Script for the OP_RETURN output. This contains the metadata for the
+///   deposit.
+/// - `keypair`: Keypair(untweaked) used to sign the transaction.
+/// - `tapnode_hash`: Optional Taproot node hash for script path commitment.
+///
+/// # Returns
+/// A signed [`Transaction`] ready for testing or simulation.
 pub fn create_test_deposit_tx(
     amt: Amount,
-    addr_script: &ScriptBuf,
+    out_script_pubkey: &ScriptBuf,
     opreturn_script: &ScriptBuf,
+    keypair: &Keypair,
+    tapnode_hash: &[u8; 32],
 ) -> Transaction {
-    let previous_output: OutputRef = ArbitraryGenerator::new().generate();
+    let mut previous_output: OutputRef = ArbitraryGenerator::new().generate();
+    previous_output.0.vout = 0;
+
+    let secp = Secp256k1::new();
+    let (xpk, _) = keypair.x_only_public_key();
+    let tapscript_root = TapNodeHash::from_byte_array(*tapnode_hash); // since there is only one
+                                                                      // script node
+    let sbuf = ScriptBuf::new_p2tr(
+        &secp,
+        xpk,
+        Some(TapNodeHash::from_byte_array(*tapnode_hash)),
+    );
+
+    let prev_txout = TxOut {
+        value: amt,
+        script_pubkey: sbuf,
+    };
 
     let inputs = vec![TxIn {
         previous_output: *previous_output.outpoint(),
@@ -64,8 +115,8 @@ pub fn create_test_deposit_tx(
     // Construct the outputs
     let outputs = vec![
         TxOut {
-            value: amt, // 10 BTC in satoshis
-            script_pubkey: addr_script.clone(),
+            value: amt,
+            script_pubkey: out_script_pubkey.clone(),
         },
         TxOut {
             value: Amount::ZERO, // Amount is zero for OP_RETURN
@@ -74,12 +125,29 @@ pub fn create_test_deposit_tx(
     ];
 
     // Create the transaction
-    Transaction {
+    let mut tx = Transaction {
         version: bitcoin::transaction::Version(2),
         lock_time: LockTime::ZERO,
         input: inputs,
         output: outputs,
-    }
+    };
+
+    let prevtxout = [prev_txout];
+    let prevouts = Prevouts::All(&prevtxout);
+    let sighash = SighashCache::new(&mut tx)
+        .taproot_key_spend_signature_hash(0, &prevouts, TapSighashType::All)
+        .unwrap();
+
+    let msg = Message::from_digest(*sighash.as_ref());
+
+    let tweaked_pair = keypair.tap_tweak(&secp, Some(tapscript_root));
+
+    // Sign the sighash
+    let sig = secp.sign_schnorr(&msg, &tweaked_pair.to_keypair());
+
+    tx.input[0].witness.push(sig.as_ref());
+
+    tx
 }
 
 pub fn build_no_op_deposit_request_script(
@@ -110,10 +178,17 @@ pub fn build_test_deposit_request_script(
     builder.into_script()
 }
 
-pub fn build_test_deposit_script(magic: Vec<u8>, idx: u32, dest_addr: Vec<u8>) -> ScriptBuf {
-    let mut data = magic;
+pub fn build_test_deposit_script(
+    dep_config: &DepositTxParams,
+    idx: u32,
+    dest_addr: Vec<u8>,
+    tapnode_hash: &[u8; 32],
+) -> ScriptBuf {
+    let mut data = dep_config.magic_bytes.clone();
     data.extend(&idx.to_be_bytes()[..]);
     data.extend(dest_addr);
+    data.extend(tapnode_hash);
+    data.extend(&dep_config.deposit_amount.to_be_bytes());
 
     let builder = script::Builder::new()
         .push_opcode(OP_RETURN)
@@ -130,4 +205,71 @@ pub fn test_taproot_addr() -> BitcoinAddress {
             .unwrap();
 
     BitcoinAddress::parse(&addr.to_string(), bitcoin::Network::Regtest).unwrap()
+}
+
+/// Creates a test deposit transaction with a specified amount and destination address.
+pub fn generate_withdrawal_fulfillment_data(
+    deposit_amt: BitcoinAmount,
+) -> (Vec<Descriptor>, Vec<[u8; 32]>, Vec<DepositEntry>) {
+    let mut gen = ArbitraryGenerator::new();
+    let mut addresses = Vec::new();
+    let mut txids = Vec::<[u8; 32]>::new();
+    for _ in 0..10 {
+        addresses.push(Descriptor::new_p2wpkh(&gen.generate()));
+        txids.push(gen.generate());
+    }
+
+    let create_outputref = |txid: &[u8; 32], vout: u32| {
+        OutPoint::new(consensus::deserialize(txid).unwrap(), vout).into()
+    };
+
+    let create_dispatched_deposit_entry =
+        |operator_idx: u32,
+         deposit_idx: u32,
+         addr: Descriptor,
+         deadline: u64,
+         deposit_txid: &[u8; 32],
+         withdrawal_request_txid: Option<Buf32>| {
+            DepositEntry::new(
+                deposit_idx,
+                create_outputref(deposit_txid, 0),
+                vec![0, 1, 2],
+                deposit_amt,
+                withdrawal_request_txid,
+            )
+            .with_state(DepositState::Dispatched(DispatchedState::new(
+                DispatchCommand::new(vec![WithdrawOutput::new(
+                    addr,
+                    Amount::from_btc(10.0).unwrap().into(),
+                )]),
+                operator_idx,
+                deadline,
+            )))
+        };
+
+    let deposits = vec![
+        // deposits with withdrawal assignments
+        create_dispatched_deposit_entry(1, 2, addresses[0].clone(), 100, &txids[0], gen.generate()),
+        create_dispatched_deposit_entry(2, 3, addresses[1].clone(), 100, &txids[1], gen.generate()),
+        create_dispatched_deposit_entry(0, 4, addresses[2].clone(), 100, &txids[2], gen.generate()),
+        // deposits without withdrawal assignments
+        DepositEntry::new(
+            5,
+            create_outputref(&txids[3], 0),
+            vec![0, 1, 2],
+            deposit_amt,
+            None,
+        )
+        .with_state(DepositState::Accepted),
+        DepositEntry::new(
+            6,
+            create_outputref(&txids[4], 0),
+            vec![0, 1, 2],
+            deposit_amt,
+            None,
+        )
+        .with_state(DepositState::Accepted),
+    ];
+
+    (addresses, txids, deposits)
 }

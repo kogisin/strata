@@ -1,29 +1,27 @@
 use std::collections::HashMap;
 
 use anyhow::Error;
-use async_trait::async_trait;
 use bitcoin::{
     block::Header,
     consensus::{deserialize, serialize},
     hashes::Hash,
     Block, BlockHash, Network, Txid,
 };
-use strata_btcio::{
-    reader::query::fetch_verification_state,
-    rpc::{
-        error::ClientError,
-        traits::ReaderRpc,
-        types::{
-            GetBlockchainInfo, GetRawTransactionVerbosityOne, GetRawTransactionVerbosityZero,
-            GetTxOut,
-        },
-        ClientResult,
+use bitcoind_async_client::{
+    error::ClientError,
+    traits::Reader,
+    types::{
+        GetBlockchainInfo, GetRawTransactionVerbosityOne, GetRawTransactionVerbosityZero, GetTxOut,
     },
+    ClientResult,
 };
+use strata_btcio::reader::query::fetch_verification_state;
 use strata_primitives::{
     buf::Buf32,
     l1::{HeaderVerificationState, L1BlockManifest, L1HeaderRecord},
 };
+
+#[derive(Debug)]
 pub struct BtcChainSegment {
     pub headers: Vec<Header>,
     pub start: u64,
@@ -102,8 +100,7 @@ impl BtcChainSegment {
             Ok(block.clone())
         } else {
             Err(ClientError::Body(format!(
-                "Block at height {} not available",
-                height
+                "Block at height {height} not available"
             )))
         }
     }
@@ -116,8 +113,7 @@ impl BtcChainSegment {
 
         if !(self.start..self.end).contains(&height) {
             return Err(ClientError::Body(format!(
-                "Block header at height {} not available",
-                height
+                "Block header at height {height} not available"
             )));
         }
         let idx = height - self.start;
@@ -142,9 +138,8 @@ impl BtcChainSegment {
     }
 }
 
-/// Implement the ReaderRpc trait for our chain segment.
-#[async_trait]
-impl ReaderRpc for BtcChainSegment {
+/// Implement the [`Reader`] trait for our chain segment.
+impl Reader for BtcChainSegment {
     /// Return a default fee estimate.
     async fn estimate_smart_fee(&self, _conf_target: u16) -> ClientResult<u64> {
         // Return a default fee (e.g., 1000 satoshis per kB)
@@ -160,8 +155,7 @@ impl ReaderRpc for BtcChainSegment {
             }
         }
         Err(ClientError::Body(format!(
-            "Block with hash {:?} not found",
-            hash
+            "Block with hash {hash:?} not found"
         )))
     }
 
@@ -177,8 +171,7 @@ impl ReaderRpc for BtcChainSegment {
             }
         }
         Err(ClientError::Body(format!(
-            "Block with hash {:?} not found",
-            hash
+            "Block with hash {hash:?} not found"
         )))
     }
 

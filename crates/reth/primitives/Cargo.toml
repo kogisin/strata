@@ -1,7 +1,10 @@
 [package]
 edition = "2021"
-name = "strata-reth-primitives"
-version = "0.1.0"
+name = "alpen-reth-primitives"
+version = "0.3.0-alpha.1"
+
+[lints]
+workspace = true
 
 [dependencies]
 alloy-sol-types.workspace = true

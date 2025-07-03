@@ -1,8 +1,11 @@
+//! Strata client for the Alpen codebase.
+
 #![feature(slice_pattern)]
 use std::{sync::Arc, time::Duration};
 
 use anyhow::anyhow;
 use bitcoin::{hashes::Hash, BlockHash};
+use bitcoind_async_client::{traits::Reader, Client};
 use el_sync::sync_chainstate_to_el;
 use errors::InitError;
 use jsonrpsee::Methods;
@@ -10,17 +13,19 @@ use rpc_client::sync_client;
 use strata_btcio::{
     broadcaster::{spawn_broadcaster_task, L1BroadcastHandle},
     reader::query::bitcoin_data_reader_task,
-    rpc::{traits::ReaderRpc, BitcoinClient},
     writer::start_envelope_task,
 };
-use strata_common::logging;
+use strata_common::{
+    logging,
+    retry::{policies::ExponentialBackoff, retry_with_backoff, DEFAULT_ENGINE_CALL_MAX_RETRIES},
+};
 use strata_config::Config;
 use strata_consensus_logic::{
-    genesis,
+    genesis::{self, make_genesis_block},
     sync_manager::{self, SyncManager},
 };
 use strata_db::{traits::BroadcastDatabase, DbError};
-use strata_eectl::engine::ExecEngineCtl;
+use strata_eectl::engine::{ExecEngineCtl, L2BlockRef};
 use strata_evmexec::{engine::RpcExecEngineCtl, EngineRpcClient};
 use strata_primitives::params::{Params, ProofPublishMode};
 use strata_rocksdb::{
@@ -77,6 +82,14 @@ fn main_inner(args: Args) -> anyhow::Result<()> {
     // Set up block params.
     let params = resolve_and_validate_params(args.rollup_params.as_deref(), &config)
         .map_err(anyhow::Error::from)?;
+
+    // Sanity check to ensure we don't break our assumptions.
+    let rollup_name = &params.rollup.rollup_name;
+    if rollup_name.len() != 4 {
+        error!("aborting due to invalid rollup name, must be 4 bytes!");
+        error!("we use this as the bridge tx magic value, this will be fixed in a future version");
+        return Err(InitError::InvalidRollupName(rollup_name.to_owned()).into());
+    }
 
     // Init the task manager and logging before we do anything else.
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -219,6 +232,7 @@ fn init_logging(rt: &Handle) {
 
 /// Shared low-level services that secondary services depend on.
 #[derive(Clone)]
+#[expect(missing_debug_implementations)]
 pub struct CoreContext {
     pub runtime: Handle,
     pub database: Arc<CommonDb>,
@@ -228,15 +242,38 @@ pub struct CoreContext {
     pub sync_manager: Arc<SyncManager>,
     pub status_channel: StatusChannel,
     pub engine: Arc<RpcExecEngineCtl<EngineRpcClient>>,
-    pub bitcoin_client: Arc<BitcoinClient>,
+    pub bitcoin_client: Arc<Client>,
 }
 
 fn do_startup_checks(
     storage: &NodeStorage,
     engine: &impl ExecEngineCtl,
-    bitcoin_client: &impl ReaderRpc,
+    bitcoin_client: &impl Reader,
+    params: &Params,
     handle: &Handle,
 ) -> anyhow::Result<()> {
+    // Ensure reth and strata are running on same params
+    let genesis_block = make_genesis_block(params);
+    let genesis_check_res = retry_with_backoff(
+        "engine_check_block_exists",
+        DEFAULT_ENGINE_CALL_MAX_RETRIES,
+        &ExponentialBackoff::default(),
+        || engine.check_block_exists(L2BlockRef::Ref(&genesis_block)),
+    );
+    match genesis_check_res {
+        Ok(true) => {
+            info!("startup: genesis params in sync with reth")
+        }
+        Ok(false) => {
+            // expected genesis block not present in reth
+            anyhow::bail!("startup: genesis params mismatch with reth");
+        }
+        Err(error) => {
+            // Likely network issue
+            anyhow::bail!("could not connect to exec engine, err = {}", error);
+        }
+    }
+
     let last_state_idx = match storage.chainstate().get_last_write_idx_blocking() {
         Ok(idx) => idx,
         Err(DbError::NotBootstrapped) => {
@@ -274,7 +311,13 @@ fn do_startup_checks(
 
     // Check that tip L2 block exists (and engine can be connected to)
     let chain_tip = tip_blockid;
-    match engine.check_block_exists(chain_tip) {
+    let tip_check_res = retry_with_backoff(
+        "engine_check_block_exists",
+        DEFAULT_ENGINE_CALL_MAX_RETRIES,
+        &ExponentialBackoff::default(),
+        || engine.check_block_exists(L2BlockRef::Id(chain_tip)),
+    );
+    match tip_check_res {
         Ok(true) => {
             info!("startup: last l2 block is synced")
         }
@@ -303,7 +346,7 @@ fn start_core_tasks(
     database: Arc<CommonDb>,
     storage: Arc<NodeStorage>,
     _bridge_msg_ops: Arc<BridgeMsgOps>,
-    bitcoin_client: Arc<BitcoinClient>,
+    bitcoin_client: Arc<Client>,
 ) -> anyhow::Result<CoreContext> {
     let runtime = executor.handle().clone();
 
@@ -318,6 +361,7 @@ fn start_core_tasks(
         storage.as_ref(),
         engine.as_ref(),
         bitcoin_client.as_ref(),
+        params.as_ref(),
         executor.handle(),
     )?;
 
@@ -445,7 +489,7 @@ fn start_broadcaster_tasks(
     broadcast_database: Arc<BroadcastDb>,
     pool: threadpool::ThreadPool,
     executor: &TaskExecutor,
-    bitcoin_client: Arc<BitcoinClient>,
+    bitcoin_client: Arc<Client>,
     params: Arc<Params>,
     broadcast_poll_interval: u64,
 ) -> Arc<L1BroadcastHandle> {

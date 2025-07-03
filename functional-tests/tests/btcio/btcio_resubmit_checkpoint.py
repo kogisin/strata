@@ -14,7 +14,7 @@ from utils import (
 
 
 @flexitest.register
-class ResubmitCheckpointTest(testenv.StrataTester):
+class ResubmitCheckpointTest(testenv.StrataTestBase):
     def __init__(self, ctx: flexitest.InitContext):
         settings = RollupParamsSettings.new_default()
         settings.proof_timeout = 5
@@ -34,12 +34,6 @@ class ResubmitCheckpointTest(testenv.StrataTester):
 
         # generate 5 btc blocks
         generate_n_blocks(btcrpc, 5)
-
-        # Wait for seq
-        wait_until(
-            lambda: seqrpc.strata_protocolVersion() is not None,
-            error_with="Sequencer did not start on time",
-        )
 
         verified_on = wait_until_with_value(
             lambda: seqrpc.strata_getL2BlockStatus(1),

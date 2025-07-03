@@ -18,11 +18,11 @@ Note that in macOS, you may need to specifically add a firewall rule to allow in
 
 ```bash
 # for Linux (x86_64)
-curl -fsSLO --proto "=https" --tlsv1.2 https://bitcoincore.org/bin/bitcoin-core-28.0/bitcoin-28.0-x86_64-linux-gnu.tar.gz
-tar xzf bitcoin-28.0-x86_64-linux-gnu.tar.gz
-sudo install -m 0755 -t /usr/local/bin bitcoin-28.0/bin/*
+curl -fsSLO --proto "=https" --tlsv1.2 https://bitcoincore.org/bin/bitcoin-core-29.0/bitcoin-29.0-x86_64-linux-gnu.tar.gz
+tar xzf bitcoin-29.0-x86_64-linux-gnu.tar.gz
+sudo install -m 0755 -t /usr/local/bin bitcoin-29.0/bin/*
 # remove the files, as we just copied it to /bin
-rm -rf bitcoin-28.0 bitcoin-28.0-x86_64-linux-gnu.tar.gz
+rm -rf bitcoin-29.0 bitcoin-29.0-x86_64-linux-gnu.tar.gz
 ```
 
 ```bash
@@ -98,6 +98,7 @@ Or, you can run a specific test group:
 ```
 
 The full list of arguments for running tests can be viewed by:
+
 ```bash
 ./run_test.sh -h
 ```
@@ -109,3 +110,25 @@ PROVER_TEST=1 ./run_test.sh -g prover
 ```
 
 The test harness script will be extended with more functionality as we need it.
+
+
+## Keep-alive env setup
+
+During development it's quite handy to have local services spin up quickly,
+instead of bothering with Docker's (build time is heavy if built from scratch).
+
+To do that, you can use the following command:
+```bash
+./run_test.sh -e <env_name>
+```
+
+For instance:
+```bash
+./run_test.sh -e basic
+```
+
+As a result, services will be kept alive, so you can send RPCs and play around.
+
+To see the full list of supported envs as well as insights of each of them,
+navigate to `entry.py` and follow along.
+

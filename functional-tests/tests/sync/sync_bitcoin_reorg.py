@@ -11,7 +11,7 @@ from utils import *
 
 
 @flexitest.register
-class BitcoinReorgChecksTest(testenv.StrataTester):
+class BitcoinReorgChecksTest(testenv.StrataTestBase):
     """This tests finalization when there is reorg on L1"""
 
     def __init__(self, ctx: flexitest.InitContext):
@@ -39,10 +39,12 @@ class BitcoinReorgChecksTest(testenv.StrataTester):
         prover_rpc = prover.create_rpc()
         seq_addr = seq.get_prop("address")
 
+        seq_waiter = self.create_strata_waiter(seqrpc)
+
         cfg: RollupConfig = ctx.env.rollup_cfg()
         finality_depth = cfg.l1_reorg_safe_depth
 
-        wait_for_genesis(seqrpc, timeout=20, step=2)
+        seq_waiter.wait_for_genesis()
 
         # Wait for prover
         wait_until(

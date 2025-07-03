@@ -9,7 +9,13 @@ import web3.middleware
 from bitcoinlib.services.bitcoind import BitcoindClient
 
 from factory import seqrpc
-from factory.config import BitcoindConfig, ClientConfig, Config, ExecConfig, RethELConfig
+from factory.config import (
+    BitcoindConfig,
+    ClientConfig,
+    Config,
+    ExecConfig,
+    RethELConfig,
+)
 from load.cfg import LoadConfig
 from load.service import LoadGeneratorService
 from utils import *
@@ -52,7 +58,7 @@ class BitcoinFactory(flexitest.Factory):
         svc = flexitest.service.ProcService(props, cmd, stdout=logfile)
         svc.start()
 
-        def _create_rpc():
+        def _create_rpc() -> BitcoindClient:
             st = svc.check_status()
             if not st:
                 raise RuntimeError("service isn't active")
@@ -76,8 +82,14 @@ class StrataFactory(flexitest.Factory):
         sequencer_address: str,  # TODO: remove this
         rollup_params: str,
         ctx: flexitest.EnvContext,
+        multi_instance_enabled: bool = False,
+        name_suffix: str = "",
+        instance_id: int = 0,
     ) -> flexitest.Service:
-        datadir = ctx.make_service_dir("sequencer")
+        if multi_instance_enabled:
+            datadir = ctx.make_service_dir(f"sequencer.{instance_id}.{name_suffix}")
+        else:
+            datadir = ctx.make_service_dir("sequencer")
         rpc_port = self.next_port()
         rpc_host = "127.0.0.1"
         logfile = os.path.join(datadir, "service.log")
@@ -136,8 +148,15 @@ class StrataSequencerFactory(flexitest.Factory):
         sequencer_rpc_port: str,
         ctx: flexitest.EnvContext,
         epoch_gas_limit: Optional[int] = None,
+        multi_instance_enabled: bool = False,
+        instance_id: int = 0,
+        name_suffix: str = "",
     ) -> flexitest.Service:
-        datadir = ctx.make_service_dir("sequencer_signer")
+        if multi_instance_enabled:
+            datadir = ctx.make_service_dir(f"sequencer_signer.{instance_id}.{name_suffix}")
+        else:
+            datadir = ctx.make_service_dir("sequencer_signer")
+
         seqkey_path = os.path.join(ctx.envdd_path, "_init", "seqkey.bin")
         logfile = os.path.join(datadir, "service.log")
 
@@ -181,9 +200,11 @@ class FullNodeFactory(flexitest.Factory):
         sequencer_rpc: str,
         rollup_params: str,
         ctx: flexitest.EnvContext,
+        name_suffix: str = "",
     ) -> flexitest.Service:
         idx = self.next_idx()
-        name = f"fullnode.{idx}"
+
+        name = f"fullnode.{idx}.{name_suffix}" if name_suffix != "" else f"fullnode.{idx}"
 
         datadir = ctx.make_service_dir(name)
         rpc_host = "127.0.0.1"
@@ -242,8 +263,10 @@ class RethFactory(flexitest.Factory):
         sequencer_reth_rpc: Optional[str],
         ctx: flexitest.EnvContext,
         custom_chain: str = "dev",
+        name_suffix: str = "",
+        enable_state_diff_gen: bool = False,
     ) -> flexitest.Service:
-        name = f"reth.{id}"
+        name = f"reth.{id}{'.' + name_suffix if name_suffix else ''}"
         datadir = ctx.make_service_dir(name)
         authrpc_port = self.next_port()
         listener_port = self.next_port()
@@ -253,7 +276,7 @@ class RethFactory(flexitest.Factory):
 
         # fmt: off
         cmd = [
-            "strata-reth",
+            "alpen-reth",
             "--disable-discovery",
             "--ipcdisable",
             "--datadir", datadir,
@@ -270,6 +293,15 @@ class RethFactory(flexitest.Factory):
             "-vvvv"
         ]
         # fmt: on
+
+        # Right now, exex pipeline seems to be very slow and suboptimal.
+        # Disabling state_diff exex for now for the basic env, with the
+        # option to enable in a separate `state_diffs` env.
+        # TODO(STR-1381): investigate and optimize exex.
+        if enable_state_diff_gen:
+            cmd.append(
+                "--enable-state-diff-gen",
+            )
 
         if sequencer_reth_rpc is not None:
             cmd.extend(["--sequencer-http", sequencer_reth_rpc])
@@ -328,8 +360,11 @@ class ProverClientFactory(flexitest.Factory):
         rollup_params: str,
         settings: ProverClientSettings,
         ctx: flexitest.EnvContext,
+        name_suffix: str = "",
     ):
-        datadir = ctx.make_service_dir("prover_client")
+        name = f"prover_client.{name_suffix}" if name_suffix != "" else "prover_client"
+
+        datadir = ctx.make_service_dir(name)
         logfile = os.path.join(datadir, "service.log")
 
         rpc_port = self.next_port()
@@ -339,10 +374,46 @@ class ProverClientFactory(flexitest.Factory):
         with open(rollup_params_file, "w") as f:
             f.write(rollup_params)
 
+        # Create TOML configuration file for prover-client
+        config_file = os.path.join(datadir, "prover-client.toml")
+        config_content = f"""# Prover Client Configuration for functional test
+# Generated automatically by functional test factory
+
+[rpc]
+# RPC server configuration for development mode
+dev_port = {rpc_port}
+dev_url = "0.0.0.0"
+
+[workers]
+# Number of worker threads for different proving backends
+native = {settings.native_workers}
+sp1 = 20
+risc0 = 20
+
+[timing]
+# Polling and timing configuration (in milliseconds and seconds)
+polling_interval_ms = {settings.polling_interval}
+checkpoint_poll_interval_s = 10
+
+[retry]
+# Retry policy configuration
+max_retry_counter = {settings.max_retry_counter}
+bitcoin_retry_count = 3
+bitcoin_retry_interval_ms = 1000
+
+[features]
+# Feature flags to enable/disable functionality
+enable_dev_rpcs = true
+enable_checkpoint_runner = {str(settings.enable_checkpoint_proving).lower()}
+"""
+
+        with open(config_file, "w") as f:
+            f.write(config_content)
+
         # fmt: off
         cmd = [
             "strata-prover-client",
-            "--rpc-port", str(rpc_port),
+            "--config", config_file,
             "--sequencer-rpc", sequencer_url,
             "--reth-rpc", reth_url,
             "--rollup-params", rollup_params_file,
@@ -350,9 +421,6 @@ class ProverClientFactory(flexitest.Factory):
             "--bitcoind-user", bitcoind_config.rpc_user,
             "--bitcoind-password", bitcoind_config.rpc_password,
             "--datadir", datadir,
-            "--native-workers", str(settings.native_workers),
-            "--polling-interval", str(settings.polling_interval),
-            "--enable-checkpoint-runner", "true" if settings.enable_checkpoint_proving else "false"
         ]
         # fmt: on
 
@@ -401,7 +469,7 @@ def _inject_service_create_rpc(svc: flexitest.service.ProcService, rpc_url: str,
             logging.warning(f"service '{name}' seems to have crashed as of call to {method}")
             raise RuntimeError(f"process '{name}' crashed")
 
-    def _create_rpc():
+    def _create_rpc() -> seqrpc.JsonrpcClient:
         rpc = seqrpc.JsonrpcClient(rpc_url)
         rpc._pre_call_hook = _status_ck
         return rpc

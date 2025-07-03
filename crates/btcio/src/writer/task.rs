@@ -1,6 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use bitcoin::Address;
+use bitcoind_async_client::{
+    traits::{Reader, Signer, Wallet},
+    Client,
+};
 use strata_config::btcio::WriterConfig;
 use strata_db::{
     traits::L1WriterDatabase,
@@ -19,7 +23,6 @@ use tracing::*;
 use super::bundler::{bundler_task, get_initial_unbundled_entries};
 use crate::{
     broadcaster::L1BroadcastHandle,
-    rpc::{traits::WriterRpc, BitcoinClient},
     status::{apply_status_updates, L1StatusUpdate},
     writer::{
         builder::EnvelopeError, context::WriterContext, signer::create_and_sign_payload_envelopes,
@@ -27,6 +30,7 @@ use crate::{
 };
 
 /// A handle to the Envelope task.
+#[expect(missing_debug_implementations)]
 pub struct EnvelopeHandle {
     ops: Arc<EnvelopeDataOps>,
     intent_tx: Sender<IntentEntry>,
@@ -110,7 +114,7 @@ impl EnvelopeHandle {
 #[allow(clippy::too_many_arguments)]
 pub fn start_envelope_task<D: L1WriterDatabase + Send + Sync + 'static>(
     executor: &TaskExecutor,
-    bitcoin_client: Arc<BitcoinClient>,
+    bitcoin_client: Arc<Client>,
     config: Arc<WriterConfig>,
     params: Arc<Params>,
     sequencer_address: Address,
@@ -170,9 +174,9 @@ fn get_next_payloadidx_to_watch(insc_ops: &EnvelopeDataOps) -> anyhow::Result<u6
 ///
 /// The envelope will be monitored until it acquires the status of
 /// [`BlobL1Status::Finalized`]
-pub async fn watcher_task<W: WriterRpc>(
+pub(crate) async fn watcher_task<R: Reader + Signer + Wallet>(
     next_watch_payload_idx: u64,
-    context: Arc<WriterContext<W>>,
+    context: Arc<WriterContext<R>>,
     insc_ops: Arc<EnvelopeDataOps>,
     broadcast_handle: Arc<L1BroadcastHandle>,
 ) -> anyhow::Result<()> {
@@ -184,6 +188,9 @@ pub async fn watcher_task<W: WriterRpc>(
     loop {
         interval.as_mut().tick().await;
 
+        let dspan = debug_span!("process payload", idx=%curr_payloadidx);
+        let _ = dspan.enter();
+
         if let Some(payloadentry) = insc_ops
             .get_payload_entry_by_idx_async(curr_payloadidx)
             .await?
@@ -192,7 +199,7 @@ pub async fn watcher_task<W: WriterRpc>(
                 // If unsigned or needs resign, create new signed commit/reveal txs and update the
                 // entry
                 L1BundleStatus::Unsigned | L1BundleStatus::NeedsResign => {
-                    debug!(?payloadentry.status, %curr_payloadidx, "Processing unsigned payloadentry");
+                    debug!(current_status=?payloadentry.status);
                     match create_and_sign_payload_envelopes(
                         &payloadentry,
                         &broadcast_handle,
@@ -209,7 +216,7 @@ pub async fn watcher_task<W: WriterRpc>(
                                 .put_payload_entry_async(curr_payloadidx, updated_entry)
                                 .await?;
 
-                            debug!(%curr_payloadidx, "Signed payload");
+                            debug!("Signed payload");
                         }
                         Err(EnvelopeError::NotEnoughUtxos(required, available)) => {
                             // Just wait till we have enough utxos and let the status be `Unsigned`
@@ -230,7 +237,7 @@ pub async fn watcher_task<W: WriterRpc>(
                 L1BundleStatus::Published
                 | L1BundleStatus::Confirmed
                 | L1BundleStatus::Unpublished => {
-                    debug!(%curr_payloadidx, "Checking payloadentry's broadcast status");
+                    trace!("Checking payloadentry's broadcast status");
                     let commit_tx = broadcast_handle
                         .get_tx_entry_by_id_async(payloadentry.commit_txid)
                         .await?;
@@ -259,7 +266,7 @@ pub async fn watcher_task<W: WriterRpc>(
                             }
                         }
                         _ => {
-                            warn!(%curr_payloadidx, "Corresponding commit/reveal entry for payloadentry not found in broadcast db. Sign and create transactions again.");
+                            warn!("Corresponding commit/reveal entry for payloadentry not found in broadcast db. Sign and create transactions again.");
                             let mut updated_entry = payloadentry.clone();
                             updated_entry.status = L1BundleStatus::Unsigned;
                             insc_ops
@@ -271,7 +278,7 @@ pub async fn watcher_task<W: WriterRpc>(
             }
         } else {
             // No payload exists, just continue the loop to wait for payload's presence in db
-            info!(%curr_payloadidx, "Waiting for payloadentry to be present in db");
+            debug!("Waiting for payloadentry to be present in db");
         }
     }
 }

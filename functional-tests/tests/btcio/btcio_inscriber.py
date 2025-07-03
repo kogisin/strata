@@ -2,11 +2,11 @@ import flexitest
 from bitcoinlib.services.bitcoind import BitcoindClient
 
 from envs import testenv
-from utils import generate_n_blocks, submit_da_blob, wait_until
+from utils import generate_n_blocks, submit_da_blob
 
 
 @flexitest.register
-class L1WriterTest(testenv.StrataTester):
+class L1WriterTest(testenv.StrataTestBase):
     def __init__(self, ctx: flexitest.InitContext):
         ctx.set_env("basic")
 
@@ -18,12 +18,6 @@ class L1WriterTest(testenv.StrataTester):
 
         # generate 5 btc blocks
         generate_n_blocks(btcrpc, 5)
-
-        # Wait for seq
-        wait_until(
-            lambda: seqrpc.strata_protocolVersion() is not None,
-            error_with="Sequencer did not start on time",
-        )
 
         # Submit blob
         blobdata = "2c4253d512da5bb4223f10e8e6017ede69cc63d6e6126916f4b68a1830b7f805"

@@ -1,14 +1,16 @@
 [package]
 edition = "2021"
 name = "strata-prover-client"
-version = "0.1.0"
+version = "0.3.0-alpha.1"
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "strata-prover-client"
 path = "src/main.rs"
 
 [dependencies]
-strata-btcio.workspace = true
 strata-common.workspace = true
 strata-db.workspace = true
 strata-l1tx.workspace = true
@@ -25,44 +27,45 @@ strata-rpc-utils.workspace = true
 strata-state.workspace = true
 strata-zkvm-hosts.workspace = true
 zkaleido.workspace = true
-zkaleido-native-adapter.workspace = true
 
 alloy-rpc-types.workspace = true
 anyhow.workspace = true
 argh.workspace = true
 async-trait.workspace = true
 bincode.workspace = true
-bitcoin = { workspace = true, features = ["rand-std"] }
+bitcoind-async-client.workspace = true
 borsh.workspace = true
-cfg-if.workspace = true
-hex.workspace = true
 jsonrpsee = { workspace = true, features = ["http-client"] }
-musig2.workspace = true
-rand.workspace = true
-rayon = "1.8.0"
 rockbound.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+toml.workspace = true
 tracing.workspace = true
-tracing-subscriber = { workspace = true, features = ["env-filter"] }
-uuid.workspace = true
 
 # sp1
 strata-sp1-guest-builder = { path = "../../provers/sp1", optional = true }
-zkaleido-sp1-host = { git = "https://github.com/alpenlabs/zkaleido", tag = "v0.1.0-alpha-rc9", optional = true }
+zkaleido-sp1-host = { git = "https://github.com/alpenlabs/zkaleido", tag = "v0.1.0-alpha-rc11", optional = true }
 
 # risc0
 strata-risc0-guest-builder = { path = "../../provers/risc0", optional = true }
-zkaleido-risc0-host = { git = "https://github.com/alpenlabs/zkaleido", tag = "v0.1.0-alpha-rc9", optional = true }
+zkaleido-risc0-host = { git = "https://github.com/alpenlabs/zkaleido", tag = "v0.1.0-alpha-rc11", optional = true }
 
 [dev-dependencies]
 strata-test-utils.workspace = true
 
 [features]
 default = []
-sp1 = ["strata-zkvm-hosts/sp1"]
-sp1-builder = ["sp1", "strata-zkvm-hosts/sp1-builder"]
-risc0 = ["strata-zkvm-hosts/risc0"]
-risc0-builder = ["risc0", "strata-zkvm-hosts/risc0-builder"]
+risc0 = ["strata-zkvm-hosts/risc0", "dep:zkaleido-risc0-host"]
+risc0-builder = [
+  "risc0",
+  "strata-zkvm-hosts/risc0-builder",
+  "dep:strata-risc0-guest-builder",
+]
+sp1 = ["strata-zkvm-hosts/sp1", "dep:zkaleido-sp1-host"]
+sp1-builder = [
+  "sp1",
+  "strata-zkvm-hosts/sp1-builder",
+  "dep:strata-sp1-guest-builder",
+]

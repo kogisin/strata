@@ -1,4 +1,5 @@
 use bitcoin::{consensus::serialize, hashes::Hash, Block};
+use bitcoind_async_client::traits::Reader;
 use strata_primitives::{
     buf::Buf32,
     l1::{
@@ -13,9 +14,8 @@ use super::{
     event::{BlockData, L1Event},
     query::ReaderContext,
 };
-use crate::rpc::traits::ReaderRpc;
 
-pub(crate) async fn handle_bitcoin_event<R: ReaderRpc>(
+pub(crate) async fn handle_bitcoin_event<R: Reader>(
     event: L1Event,
     ctx: &ReaderContext<R>,
     event_submitter: &impl EventSubmitter,
@@ -45,7 +45,7 @@ pub(crate) async fn handle_bitcoin_event<R: ReaderRpc>(
     Ok(())
 }
 
-async fn handle_blockdata<R: ReaderRpc>(
+async fn handle_blockdata<R: Reader>(
     ctx: &ReaderContext<R>,
     blockdata: BlockData,
     hvs: Option<HeaderVerificationState>,
@@ -112,8 +112,8 @@ fn generate_l1txs(blockdata: &BlockData) -> Vec<L1Tx> {
         .map(|tx_entry| {
             generate_l1_tx(
                 blockdata.block(),
-                tx_entry.index(),
-                tx_entry.contents().protocol_ops().to_vec(),
+                *tx_entry.index(),
+                tx_entry.item().protocol_ops().to_vec(),
             )
         })
         .collect()

@@ -12,39 +12,61 @@ env:
 permissions: {}
 
 jobs:
+  extract-rust-version:
+    name: Extract Rust toolchain version
+    runs-on: ubuntu-latest
+    outputs:
+      rust-version: ${{ steps.extract.outputs.rust-version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+
+      - name: Extract Rust toolchain version
+        id: extract
+        uses: ./.github/actions/extract-rust-version # zizmor: ignore[unpinned-uses]
+
   clippy:
     name: Run clippy on crates
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@clippy
-      - uses: Swatinem/rust-cache@v2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@22a6a5b0f9f487c5f5587025ae9d4a1caf2a8a78 # clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2
         with:
           cache-on-failure: true
-      - run: cargo clippy --workspace --lib --examples --tests --benches --all-features --all-targets --locked
+      - name: Run clippy
+        run: cargo clippy --workspace --lib --bins --examples --tests --benches --all-features --all-targets --locked
         env:
           RUSTFLAGS: -D warnings
 
   crate-checks:
     name: Check that crates compile on their own
     runs-on: ubuntu-latest
+    needs: extract-rust-version
     timeout-minutes: 90 # cold run takes a lot of time as each crate is compiled separately
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
 
       - name: Cleanup space
         uses: ./.github/actions/cleanup # zizmor: ignore[unpinned-uses]
 
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@a02741459ec5e501b9843ed30b535ca0a0376ae4 # nightly
         with:
-          toolchain: nightly-2024-07-27
-      - uses: taiki-e/install-action@cargo-hack
-      - uses: Swatinem/rust-cache@v2
+          toolchain: ${{ needs.extract-rust-version.outputs.rust-version }}
+      - uses: taiki-e/install-action@1b0e852a3465a29cd0b17876f2de42a88d145e91 # cargo-hack
+      - uses: Swatinem/rust-cache@98c8021b550208e191a6a3145459bfc9fb29c4c0 # v2
         with:
           cache-on-failure: true
       - name: Configure sccache
@@ -52,7 +74,7 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo  "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
         with:
           version: "v0.10.0" # sccache version
 
@@ -61,15 +83,17 @@ jobs:
   fmt:
     name: Check code formatting
     runs-on: ubuntu-latest
+    needs: extract-rust-version
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: dtolnay/rust-toolchain@a02741459ec5e501b9843ed30b535ca0a0376ae4 # nightly
         with:
           components: rustfmt
-          toolchain: nightly-2024-07-27
+          toolchain: ${{ needs.extract-rust-version.outputs.rust-version }}
       - run: cargo fmt --all --check
 
   codespell:
@@ -77,23 +101,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
-      - uses: codespell-project/actions-codespell@v2
+      - uses: codespell-project/actions-codespell@406322ec52dd7b488e48c1c4b82e2a8b3a1bf630 # v2
 
   taplo:
     name: Lint and check formatting of TOML files
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
       - name: Install taplo
         run: |
           curl -fsSL https://github.com/tamasfe/taplo/releases/latest/download/taplo-full-linux-x86_64.gz \
             | gzip -d - | install -m 755 /dev/stdin /usr/local/bin/taplo
+      - name: Print taplo version
+        run: |
+          taplo --version
       - name: Run taplo lint
         run: |
           taplo lint
@@ -114,6 +141,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
-        uses: re-actors/alls-green@release/v1
+        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # release/v1
         with:
           jobs: ${{ toJSON(needs) }}

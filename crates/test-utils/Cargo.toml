@@ -1,31 +1,28 @@
 [package]
 edition = "2021"
 name = "strata-test-utils"
-version = "0.1.0"
+version = "0.3.0-alpha.1"
+
+[lints]
+workspace = true
 
 [dependencies]
 strata-btcio.workspace = true
 strata-chaintsn.workspace = true
 strata-consensus-logic.workspace = true
-strata-db = { workspace = true, features = ["stubs"] }
-strata-l1tx.workspace = true
+strata-l1tx = { workspace = true, features = ["test_utils"] }
 strata-primitives.workspace = true
-strata-proofimpl-cl-stf.workspace = true
 strata-proofimpl-evm-ee-stf.workspace = true
-strata-state.workspace = true
-strata-storage.workspace = true
+strata-state = { workspace = true, features = ["test_utils"] }
 
 anyhow.workspace = true
 arbitrary.workspace = true
-async-trait.workspace = true
 bitcoin = { workspace = true, features = ["rand-std"] }
+bitcoind-async-client.workspace = true
 borsh.workspace = true
 hex.workspace = true
 musig2.workspace = true
 rand.workspace = true
 rand_core.workspace = true
-revm.workspace = true
-rockbound.workspace = true
 serde_json.workspace = true
-threadpool.workspace = true
 tokio.workspace = true

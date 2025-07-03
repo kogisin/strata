@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use bitcoind_async_client::traits::{Broadcaster, Reader, Signer, Wallet};
 use strata_db::{
     types::{L1TxEntry, L1TxStatus},
     DbResult,
@@ -11,8 +12,8 @@ use tokio::sync::mpsc;
 use tracing::*;
 
 use super::task::broadcaster_task;
-use crate::rpc::traits::{BroadcasterRpc, ReaderRpc, SignerRpc, WalletRpc};
 
+#[expect(missing_debug_implementations)]
 pub struct L1BroadcastHandle {
     ops: Arc<BroadcastDbOps>,
     sender: mpsc::Sender<(u64, L1TxEntry)>,
@@ -73,7 +74,7 @@ pub fn spawn_broadcaster_task<T>(
     broadcast_poll_interval: u64,
 ) -> L1BroadcastHandle
 where
-    T: ReaderRpc + BroadcasterRpc + WalletRpc + SignerRpc + Send + Sync + 'static,
+    T: Reader + Broadcaster + Wallet + Signer + Send + Sync + 'static,
 {
     let (broadcast_entry_tx, broadcast_entry_rx) = mpsc::channel::<(u64, L1TxEntry)>(64);
     let ops = broadcast_ops.clone();

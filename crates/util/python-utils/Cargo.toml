@@ -1,7 +1,10 @@
 [package]
 edition = "2021"
 name = "strata-python-utils"
-version = "0.6.0"
+version = "0.3.0-alpha.1"
+
+[lints]
+workspace = true
 
 [lib]
 name = "strata_utils"
@@ -13,8 +16,8 @@ name = "strata_utils"
 crate-type = ["cdylib"]
 
 [dependencies]
-shrex = { version = "0.1.0", path = "../shrex", features = ["serde"] }
-strata-crypto = { workspace = true, features = ["rand"] }
+shrex = { version = "0.3.0-alpha.1", path = "../shrex", features = ["serde"] }
+strata-crypto.workspace = true
 strata-primitives.workspace = true
 
 bdk_bitcoind_rpc.workspace = true
@@ -31,10 +34,13 @@ secp256k1.workspace = true
 pyo3-build-config = ">=0.24.1"
 
 [dev-dependencies]
-strata-btcio.workspace = true
 strata-common.workspace = true
 
 anyhow.workspace = true
-corepc-node = { version = "0.4.0", features = ["28_0"] }
+bitcoind-async-client.workspace = true
+
+# update bitcoind version in CI to match corepc-node feature
+corepc-node = { version = "0.8.0", features = ["29_0"] }
+
 tokio.workspace = true
 tracing.workspace = true

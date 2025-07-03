@@ -162,16 +162,19 @@ fn process_l1_block(
     block_mf: &L1BlockManifest,
     params: &RollupParams,
 ) -> Result<(), TsnError> {
+    let blkid = block_mf.blkid();
+
     // Just iterate through every tx's operation and call out to the handlers for that.
     for tx in block_mf.txs() {
-        let in_blkid = block_mf.blkid();
         for op in tx.protocol_ops() {
             // Try to process it, log a warning if there's an error.
             if let Err(e) = process_proto_op(state, block_mf, op, params) {
-                warn!(?op, %in_blkid, %e, "invalid protocol operation");
+                warn!(?op, in_blkid = %blkid, %e, "invalid protocol operation");
             }
         }
     }
+
+    debug!(%blkid, "processed block manifest");
 
     Ok(())
 }
@@ -184,18 +187,28 @@ fn process_proto_op(
 ) -> Result<(), OpError> {
     match &op {
         ProtocolOperation::Checkpoint(ckpt) => {
+            let epoch = ckpt.checkpoint().batch_info().epoch();
+            debug!(%epoch, "processing checkpoint proto-op");
             process_l1_checkpoint(state, block_mf, ckpt, params)?;
         }
 
         ProtocolOperation::Deposit(info) => {
+            let deposit_idx = info.deposit_idx;
+            debug!(%deposit_idx, "processing deposit proto-op");
             process_l1_deposit(state, block_mf, info)?;
         }
 
         ProtocolOperation::WithdrawalFulfillment(info) => {
+            let deposit_idx = info.deposit_idx;
+            let txid = &info.txid;
+            debug!(%deposit_idx, %txid, "processing withdrawal fulfillment proto-op");
             process_withdrawal_fulfillment(state, info)?;
         }
 
         ProtocolOperation::DepositSpent(info) => {
+            let deposit_idx = info.deposit_idx;
+            let txid = &info.deposit_idx;
+            debug!(%deposit_idx, %txid, "processing reimbursement proto-op");
             process_deposit_spent(state, info)?;
         }
 
@@ -236,13 +249,15 @@ fn process_l1_checkpoint(
         warn!(%ckpt_epoch, "Empty proof posted");
         // If the proof is empty but empty proofs are not allowed, this will fail.
         if !params.proof_publish_mode.allow_empty() {
-            error!(%ckpt_epoch, "Invalid checkpoint: Empty proof");
+            error!(%ckpt_epoch, "Invalid checkpoint: Received empty proof while in strict proof mode. Check `proof_publish_mode` in rollup parameters; set it to a non-strict mode (e.g., `timeout`) to accept empty proofs.");
             return Err(OpError::InvalidProof);
         }
     } else {
         // Otherwise, verify the non-empty proof.
-        verify_rollup_groth16_proof_receipt(&receipt, &params.rollup_vk)
-            .map_err(|e| OpError::InvalidProof)?;
+        verify_rollup_groth16_proof_receipt(&receipt, &params.rollup_vk).map_err(|error| {
+            error!(%ckpt_epoch, %error, "Failed to verify non-empty proof for epoch");
+            OpError::InvalidProof
+        })?;
     }
 
     // Copy the epoch commitment and make it finalized.
@@ -292,6 +307,10 @@ fn process_withdrawal_fulfillment(
     state: &mut StateCache,
     info: &WithdrawalFulfillmentInfo,
 ) -> Result<(), OpError> {
+    if !state.check_deposit_exists(info.deposit_idx) {
+        return Err(OpError::UnknownDeposit(info.deposit_idx));
+    }
+
     state.mark_deposit_fulfilled(info);
     Ok(())
 }
@@ -299,6 +318,9 @@ fn process_withdrawal_fulfillment(
 /// Locked deposit on L1 has been spent.
 fn process_deposit_spent(state: &mut StateCache, info: &DepositSpendInfo) -> Result<(), OpError> {
     // Currently, we are not tracking how this was spent, only that it was.
+    if !state.check_deposit_exists(info.deposit_idx) {
+        return Err(OpError::UnknownDeposit(info.deposit_idx));
+    }
 
     state.mark_deposit_reimbursed(info.deposit_idx);
     Ok(())

@@ -10,14 +10,14 @@ use crate::envelope::parser::parse_envelope_payloads;
 /// the checkpoint envelope.
 // TODO: we need to change envelope structure and possibly have envelopes for checkpoints and
 // DA separately
-pub fn parse_valid_checkpoint_envelopes<'a>(
+pub(crate) fn parse_valid_checkpoint_envelopes<'a>(
     tx: &'a Transaction,
     filter_conf: &'a TxFilterConfig,
 ) -> impl Iterator<Item = SignedCheckpoint> + 'a {
     tx.input.iter().flat_map(move |inp| {
         inp.witness
-            .tapscript()
-            .and_then(|scr| parse_envelope_payloads(&scr.into(), filter_conf).ok())
+            .taproot_leaf_script()
+            .and_then(|scr| parse_envelope_payloads(&scr.script.into(), filter_conf).ok())
             .map(|items| {
                 items
                     .into_iter()
