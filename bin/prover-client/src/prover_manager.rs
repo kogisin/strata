@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use strata_db::traits::ProofDatabase;
+use strata_db_store_rocksdb::prover::db::ProofDb;
 use strata_primitives::proof::{ProofContext, ProofKey, ProofZkVm};
-use strata_rocksdb::prover::db::ProofDb;
 use tokio::{spawn, sync::Mutex, time::sleep};
 use tracing::{error, info, warn};
 
@@ -216,22 +216,23 @@ async fn make_proof(
 /// Handles the task error by determining the next status based on [`ProvingTaskError`] nature.
 fn handle_task_error(task: ProofKey, e: ProvingTaskError) -> ProvingTaskStatus {
     match e {
-        ProvingTaskError::RpcError(_) => {
+        ProvingTaskError::RpcError(_)
+        | ProvingTaskError::ZkVmError(zkaleido::ZkVmError::NetworkRetryableError(_)) => {
             // RpcError is retryable as it usually indicates the downstream services may
             // currently be unavailable.
+            // NetworkRetryableError indicates network error on SP1 side.
+            // See STR-1410 and STR-1473 for details.
             info!(?task, ?e, "proving task failed transiently");
             ProvingTaskStatus::TransientFailure
         }
-        ProvingTaskError::ZkVmError(zkaleido::ZkVmError::ProofGenerationError(ref message)) => {
-            if message.to_lowercase().contains("unavailable") {
-                // This type of error with status:Unavailable indicates network error on SP1 side.
-                // See STR-1410 for details.
-                info!(?task, ?e, "proving task failed transiently");
-                ProvingTaskStatus::TransientFailure
-            } else {
-                error!(?task, ?e, "proving task failed");
-                ProvingTaskStatus::Failed
-            }
+        ProvingTaskError::IdempotentCompletion(_) => {
+            // The checkpoint task has been completed in the past.
+            info!(
+                ?task,
+                ?e,
+                "proving task was done in the past, so completing it now in an idempotent way."
+            );
+            ProvingTaskStatus::Completed
         }
         _ => {
             // Other errors are treated as non-retryable, so the task is failed permanently.
@@ -245,8 +246,13 @@ fn handle_task_error(task: ProofKey, e: ProvingTaskError) -> ProvingTaskStatus {
 /// Then, the [`ProvingTaskError`] is handled as usual.
 fn handle_checkpoint_error(chkpt_err: CheckpointError) -> ProvingTaskError {
     match chkpt_err {
-        CheckpointError::FetchError(error) | CheckpointError::SubmitProofError { error, .. } => {
-            ProvingTaskError::RpcError(error)
+        CheckpointError::FetchError(error) => ProvingTaskError::RpcError(error),
+        CheckpointError::SubmitProofError { error, .. } => {
+            if error.to_lowercase().contains("proof already created") {
+                ProvingTaskError::IdempotentCompletion(error)
+            } else {
+                ProvingTaskError::RpcError(error)
+            }
         }
         CheckpointError::CheckpointNotFound(_) => ProvingTaskError::WitnessNotFound,
         CheckpointError::ProofErr(proving_task_error) => proving_task_error,
@@ -299,8 +305,8 @@ mod tests {
             ProofContext::Checkpoint(0),
             strata_primitives::proof::ProofZkVm::SP1,
         );
-        let err = ProvingTaskError::ZkVmError(zkaleido::ZkVmError::ProofGenerationError(
-            "Unavailable".to_string(),
+        let err = ProvingTaskError::ZkVmError(zkaleido::ZkVmError::NetworkRetryableError(
+            "Some Network Error".to_string(),
         ));
 
         assert_eq!(

@@ -3,31 +3,29 @@ use std::{str::FromStr, time::Duration};
 use alloy::{primitives::Address as AlpenAddress, providers::WalletProvider};
 use argh::FromArgs;
 use bdk_wallet::{
-    bitcoin::{
-        script::PushBytesBuf, taproot::LeafVersion, Address, ScriptBuf, TapNodeHash, XOnlyPublicKey,
-    },
+    bitcoin::{script::PushBytesBuf, secp256k1::SECP256K1, PrivateKey, XOnlyPublicKey},
     chain::ChainOracle,
     coin_selection::InsufficientFunds,
     descriptor::IntoWalletDescriptor,
     error::CreateTxError,
-    miniscript::{miniscript::Tap, Miniscript},
     template::DescriptorTemplateOut,
     KeychainKind, TxOrdering, Wallet,
 };
 use colored::Colorize;
 use indicatif::ProgressBar;
-use strata_primitives::constants::RECOVER_DELAY;
+use rand_core::OsRng;
+use shrex::encode;
+use strata_primitives::crypto::even_kp;
 
 use crate::{
     alpen::AlpenWallet,
-    constants::{BRIDGE_IN_AMOUNT, RECOVER_AT_DELAY, SIGNET_BLOCK_TIME},
+    constants::SIGNET_BLOCK_TIME,
     errors::{DisplayableError, DisplayedError},
     link::{OnchainObject, PrettyPrint},
     recovery::DescriptorRecovery,
     seed::Seed,
     settings::Settings,
     signet::{get_fee_rate, log_fee_rate, SignetWallet},
-    taproot::{ExtractP2trPubkey, NotTaprootAddress},
 };
 
 /// Deposits 10 BTC from signet into Alpen
@@ -67,28 +65,29 @@ pub async fn deposit(
     l1w.sync()
         .await
         .internal_error("Failed to sync signet wallet")?;
-    let recovery_address = l1w.reveal_next_address(KeychainKind::External).address;
-    let recovery_address_pk = recovery_address
-        .extract_p2tr_pubkey()
-        .expect("internal keychain should be taproot");
-    l1w.persist()
-        .internal_error("Failed to persist signet wallet")?;
 
     let alpen_address = requested_alpen_address.unwrap_or(l2w.default_signer_address());
     println!(
         "Bridging {} to Alpen address {}",
-        BRIDGE_IN_AMOUNT.to_string().green(),
+        settings.bridge_in_amount.to_string().green(),
         alpen_address.to_string().cyan(),
     );
 
+    let (secret_key, recovery_public_key) = even_kp(SECP256K1.generate_keypair(&mut OsRng));
+    let recovery_public_key = recovery_public_key.x_only_public_key().0;
+
     println!(
-        "Recovery address: {}",
-        recovery_address.to_string().yellow()
+        "Recovery public key: {}",
+        encode(&recovery_public_key.serialize()).yellow()
     );
 
-    let (bridge_in_desc, _recovery_script, _recovery_script_hash) =
-        bridge_in_descriptor(settings.bridge_musig2_pubkey, recovery_address)
-            .expect("valid bridge in descriptor");
+    let recovery_private_key = PrivateKey::new(secret_key.into(), settings.network);
+
+    let bridge_in_desc = bridge_in_descriptor(
+        settings.bridge_musig2_pubkey,
+        recovery_private_key,
+        settings.recover_delay,
+    );
 
     let desc = bridge_in_desc
         .clone()
@@ -106,7 +105,11 @@ pub async fn deposit(
         .expect("valid chain tip")
         .height;
 
-    let recover_at = current_block_height + RECOVER_AT_DELAY;
+    // Number of blocks after which the wallet actually enables recovery. This is mostly to account
+    // for any reorgs that may happen at the recovery height.
+    let recover_at_delay = settings.recover_delay + settings.finality_depth;
+
+    let recover_at = current_block_height + recover_at_delay;
 
     let bridge_in_address = temp_wallet
         .reveal_next_address(KeychainKind::External)
@@ -125,7 +128,7 @@ pub async fn deposit(
     // <recovery_address_pk>
     // <alpen_address>
     let magic_bytes = settings.magic_bytes.as_bytes();
-    let recovery_address_pk_bytes = recovery_address_pk.serialize();
+    let recovery_address_pk_bytes = recovery_public_key.serialize();
     let alpen_address_bytes = alpen_address.as_slice();
     let mut op_return_data = Vec::with_capacity(
         magic_bytes.len() + recovery_address_pk_bytes.len() + alpen_address_bytes.len(),
@@ -143,7 +146,7 @@ pub async fn deposit(
         let mut builder = l1w.build_tx();
         // Important: the deposit won't be found by the sequencer if the order isn't correct.
         builder.ordering(TxOrdering::Untouched);
-        builder.add_recipient(bridge_in_address.script_pubkey(), BRIDGE_IN_AMOUNT);
+        builder.add_recipient(bridge_in_address.script_pubkey(), settings.bridge_in_amount);
         builder.add_data(&push_bytes);
         builder.fee_rate(fee_rate);
         match builder.finish() {
@@ -202,57 +205,69 @@ pub async fn deposit(
 /// and the single script path spend is locked to the user's recovery address with a timelock of
 fn bridge_in_descriptor(
     bridge_pubkey: XOnlyPublicKey,
-    recovery_address: Address,
-) -> Result<(DescriptorTemplateOut, ScriptBuf, TapNodeHash), NotTaprootAddress> {
-    let recovery_xonly_pubkey = recovery_address.extract_p2tr_pubkey()?;
-
-    let desc = bdk_wallet::descriptor!(
+    private_key: PrivateKey,
+    recover_delay: u32,
+) -> DescriptorTemplateOut {
+    bdk_wallet::descriptor!(
         tr(bridge_pubkey,
-            and_v(v:pk(recovery_xonly_pubkey),older(RECOVER_DELAY))
+            and_v(v:pk(private_key),older(recover_delay))
         )
     )
-    .expect("valid descriptor");
-
-    // we have to do this to obtain the script hash
-    // i have tried to extract it directly from the desc above
-    // it is a massive pita
-    let recovery_script = Miniscript::<XOnlyPublicKey, Tap>::from_str(&format!(
-        "and_v(v:pk({recovery_xonly_pubkey}),older({RECOVER_DELAY}))"
-    ))
-    .expect("valid recovery script")
-    .encode();
-
-    let recovery_script_hash = TapNodeHash::from_script(&recovery_script, LeafVersion::TapScript);
-
-    Ok((desc, recovery_script, recovery_script_hash))
+    .expect("valid descriptor")
 }
 
 #[cfg(test)]
 mod tests {
-    use bdk_wallet::bitcoin::{consensus, secp256k1::SECP256K1, Network, Sequence};
+    use std::sync::Arc;
+
+    use bdk_wallet::{
+        bitcoin::{secp256k1::SECP256K1, Network},
+        keys::{DescriptorPublicKey, SinglePub, SinglePubKey},
+        miniscript::{descriptor::TapTree, Descriptor, Miniscript},
+    };
+    use strata_primitives::constants::RECOVER_DELAY;
 
     use super::*;
 
     #[test]
-    fn bridge_in_descriptor_script() {
-        pub(crate) const BRIDGE_MUSIG2_PUBKEY: &str =
-            "14ced579c6a92533fa68ccc16da93b41073993cfc6cc982320645d8e9a63ee65";
+    fn bridge_in_desc() {
+        let bridge_pubkey = XOnlyPublicKey::from_str(
+            "89f96f834e39766f97e245d70b27236681f741ae51c117df19761af7cb2f657e",
+        )
+        .expect("valid pubkey");
 
-        let bridge_musig2_pubkey = BRIDGE_MUSIG2_PUBKEY.parse::<XOnlyPublicKey>().unwrap();
-        let internal_recovery_pubkey = XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap();
-        let recovery_address =
-            Address::p2tr(SECP256K1, internal_recovery_pubkey, None, Network::Bitcoin);
-        let external_recovery_pubkey = recovery_address.extract_p2tr_pubkey().unwrap();
-        let sequence = Sequence::from_consensus(RECOVER_DELAY);
-        let sequence_hex = consensus::encode::serialize_hex(&sequence);
+        let (secret_key, public_key) = SECP256K1.generate_keypair(&mut OsRng);
 
-        let (_bridge_in_descriptor, recovery_script, _recovery_script_hash) =
-            bridge_in_descriptor(bridge_musig2_pubkey, recovery_address).unwrap();
+        let recovery_private_key = PrivateKey::new(secret_key, Network::Bitcoin);
 
-        let expected = format!(
-            "OP_PUSHBYTES_32 {external_recovery_pubkey} OP_CHECKSIGVERIFY OP_PUSHBYTES_2 {sequence_hex:.4} OP_CSV"
+        let (desc, _key_map, _network) =
+            bridge_in_descriptor(bridge_pubkey, recovery_private_key, RECOVER_DELAY);
+        assert!(desc.sanity_check().is_ok());
+        let Descriptor::Tr(tr_desc) = desc else {
+            panic!("should be taproot descriptor")
+        };
+
+        let expected_recovery_script = format!("and_v(v:pk({public_key}),older({RECOVER_DELAY}))",);
+
+        let expected_taptree = TapTree::Leaf(Arc::new(
+            Miniscript::from_str(&expected_recovery_script).expect("valid miniscript"),
+        ));
+
+        let expected_internal_key = DescriptorPublicKey::Single(SinglePub {
+            origin: None,
+            key: SinglePubKey::XOnly(bridge_pubkey),
+        });
+
+        assert_eq!(
+            tr_desc.internal_key(),
+            &expected_internal_key,
+            "internal key should be the bridge pubkey"
         );
-        let got = recovery_script.to_asm_string();
-        assert_eq!(got, expected);
+
+        assert_eq!(
+            tr_desc.tap_tree().as_ref().expect("taptree to be present"),
+            &expected_taptree,
+            "tap tree should be the expected taptree"
+        )
     }
 }
